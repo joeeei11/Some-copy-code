@@ -1,0 +1,173 @@
+#!/usr/bin/env python
+import socket
+import time
+import struct
+import numpy as np
+import pandas as pd
+from fbcca import fbcca
+from robot import robot
+from matplotlib import pyplot as plt
+from scipy import signal
+from scipy.io import loadmat, savemat
+# 定义服务器的主机地址和端口号以及缓冲区大小
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 8712
+BUFFER_SIZE = 1440
+
+MESSAGE = "client"
+
+def run_client():
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_address = (SERVER_HOST, SERVER_PORT)
+
+    client_socket.connect(server_address)
+    a = np.zeros((1, 9))
+    writer = pd.ExcelWriter('data.xlsx')
+    start_rd_eeg = False
+    eeg = np.zeros((1, 9))
+    ccc = 0
+    while True:
+        raw = client_socket.recv(BUFFER_SIZE, socket.MSG_WAITALL)
+        data = struct.unpack('<' + '9f' * 40, raw)
+        time.sleep(0.04)
+        for i in range(40):
+            raw_point = raw[i*36 + 0:i*36 + 36]
+            data_point = struct.unpack('<9f', raw)[0]
+            data.append(data)
+        a = np.array(data).reshape(-1, 9)
+
+        if start_rd_eeg:
+            eeg = np.concatenate((eeg, a)) #np.append(eeg, a)
+
+        b = np.argwhere(a == 255)
+
+        if len(b) > 0:
+            start_rd_eeg = True
+            eeg = a[b[0, 0]:, :]
+
+        if eeg.shape[0] >= 4000:
+            start_rd_eeg = False
+
+            print(eeg.shape)
+            eeg_dic = {"eeg": eeg}
+            savemat('eeg.mat', eeg_dic)
+
+            eeg_mean = np.mean(eeg[:, :-1], axis=0)
+            eeg_data = eeg[:, :-1] #- eeg_mean
+            print(eeg_mean)
+            print(eeg_data.shape)
+
+            eeg_avg = np.mean(eeg[:, :-1], axis=1)
+            print(eeg_avg.shape)
+            eeg_data = np.zeros(eeg[:, :-1].shape)
+            for i in range(8):
+                eeg_data[:, i] = eeg[:, i] - eeg_avg
+            print(eeg_data.shape)
+            print(eeg_data)
+
+            plt.plot(eeg_data)
+            plt.show()
+
+            eeg = np.zeros((1, 9))
+            ds_data = eeg_data[0:4000:4, :].T
+            af_notch_data = preprocess(ds_data)
+            plt.plot(af_notch_data.T)
+            plt.show()
+
+            order = 3
+            wn = [1 / 500, 100 / 500]
+            (b1, a1) = signal.butter(order, wn, 'bandpass')
+            af_filter_data = signal.filtfilt(b1, a1, af_notch_data)
+            plt.plot(af_filter_data.T)
+            plt.show()
+
+            # Nyquist Frequency = Fs/2N
+            fs = 1000
+            Nq = fs / 2
+            f1 = 50
+            f_1 = 1
+            f_2 = 30
+            Q = 35
+            (b0, a0) = signal.iirnotch(f1, Q, fs)
+            af_notch_data = signal.filtfilt(b0, a0, eeg_data.T)
+            plt.plot(af_notch_data.T)
+            plt.show()
+            order = 3
+            wn = [f_1 * 2 / fs, f_2 * 2 / fs]
+            (b1, a1) = signal.butter(order, wn, 'bandpass')
+            af_filter_data = signal.filtfilt(b1, a1, af_notch_data)
+            plt.plot(af_filter_data.T)
+            plt.show()
+
+            Wp = [3 / Nq, 27 / Nq]
+            Ws = [1 / Nq, 30 / Nq]
+            [N, Wn] = signal.cheb1ord(Wp, Ws, 3, 40)  # band pass filter StopBand=[Ws(1)~Ws(2)] PassBand=[Wp(1)~Wp(2)]
+            [B, A] = signal.cheby1(N, 0.5, Wn, 'bandpass')  # Wn passband edge frequency
+            eeg_data_fd = signal.filtfilt(B, A, eeg_data.T, padtype='odd', padlen=3 * (max(len(B), len(A)) - 1))
+            print(eeg_data_fd.shape)
+            eeg_data_fd = preprocess(eeg_data.T)
+            plt.plot(eeg_data_fd.T)
+            plt.show()
+            ds_data = af_notch_data[:, 0:2000:4]
+            print(ds_data.shape)
+            list_freqs = [8.0, 9.0, 9.6, 9.8, 10.0, 10.2, 10.4, 11.0, 12.0]
+            result = fbcca(af_notch_data, list_freqs, fs=250, num_harms=3, num_fbs=5)
+            ccc = ccc+1
+            print('result {}: {}'.format(ccc, result))
+
+            Robot = robot()
+            Threshold = 3  #减少噪音
+
+            COMMAND = ['left+', 'left', 'forward', 'forward+', 'stop',
+                        'right', 'right+', 'back', 'back+']
+            output_command = np.zeros(len(list_freqs))
+            result = fbcca(eeg[:2000, 0:-1], list_freqs, fs=1000, num_harms=3, num_fbs=5)
+            if result == 999:
+                print('No command match')
+            else:
+                print(COMMAND[result])
+                output_command[result] += 1
+                if output_command.max() == Threshold:
+                    output = np.argmax(output_command)
+                    Robot.send(COMMAND[result])
+                    output = 0
+                    output_command = np.zeros(len(list_freqs))
+                    print(COMMAND[output])
+        c = np.argwhere(a==254)
+        if len(b) > 0:
+            print(a[b[0, 0], :])
+        if len(c) > 0:
+            print(a[c[0, 0], :])
+        if a[0, 8] != 0:
+            print(a[0, :])
+        a = np.append(a, np.array(data).reshape(-1, 9))
+        print(a)
+
+        d = pd.DataFrame(a)
+
+        d.to_excel(writer, '1')
+    writer.save()
+    writer.close()
+    # end-of-function run_client
+    client_socket.close()
+
+def __get_pre_filter(self, samp_rate):
+    fs = samp_rate
+    f0 = 50
+    Q = 35
+    b, a = signal.iircomb(f0, Q, ftype='notch', fs=fs)
+    b = np.array([0.95702, 0, 0, 0, 0, -0.95702])
+    a = np.array([1, 0, 0, 0, 0, -0.91404])
+    return b, a
+
+def preprocess(data):
+    # 选择使用的导联
+    # data = data[self.select_channel, :]
+    b = np.array([0.95702, 0, 0, 0, 0, -0.95702])
+    a = np.array([1, 0, 0, 0, 0, -0.91404])
+    filter_data = signal.filtfilt(b, a, data)
+    return filter_data
+
+if __name__ == '__main__':
+    print('[*] Running TCP client...')
+    run_client()

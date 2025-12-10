@@ -1,0 +1,17 @@
+    def __get_pre_filter(self, samp_rate):
+        fs = samp_rate
+        f0 = 50
+        Q = 35
+        # b, a = signal.iircomb(f0, q, ftype='notch', fs=fs)
+        b = np.array([0.95702, 0, 0, 0, 0, -0.95702])
+        a = np.array([1, 0, 0, 0, 0, -0.91404])
+        return b, a
+
+    def __clear_cache(self):
+        self.cache_data = None
+
+    def __preprocess(self, data):
+        # 选择使用的导联
+        data = data[self.select_channel, :]
+        filter_data = signal.filtfilt(self.filterB, self.filterA, data)
+        return filter_data
